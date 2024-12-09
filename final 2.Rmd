@@ -1,0 +1,511 @@
+---
+title: "final 2"
+author: "Kindle Zhang qz2527"
+date: "2024-12-07"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE)
+library(mlmRev)
+library(lme4)
+library(MASS)
+library(geepack)
+library(gee)
+library(caret)
+library(tidyverse)
+library(gt)
+```
+
+```{r}
+data(Contraception)
+Contraception$use = as.numeric(Contraception$use) - 1
+Contraception$urban = as.numeric(Contraception$urban) - 1
+Contraception = Contraception |> 
+  select(-woman)
+
+Contraception$age = round(Contraception$age - min(Contraception$age))
+Contraception = Contraception |> 
+  arrange(district, age)
+
+set.seed(24)
+trainIndex = createDataPartition(Contraception$use, p = 0.8, list = FALSE)
+trainData = Contraception[trainIndex, ]
+testData = Contraception[-trainIndex, ]
+
+# summary data
+str(trainData)
+summary(trainData)
+
+colSums(is.na(trainData))
+```
+
+```{r}
+table(trainData$use)
+table(trainData$livch, trainData$use)
+```
+
+# EDA
+
+## in every district: use vs livch
+
+```{r}
+split_data = split(trainData, trainData$district)
+
+chisq_tests_livch = lapply(split_data,
+                           function(group)
+                             chisq.test(table(group$use, group$livch)))
+chisq_tests_livch
+
+p_values = sapply(chisq_tests_livch, function(test) {
+  if (!is.null(test)) {
+    test$p.value
+  } else {
+    NA
+  }
+})
+
+p_values = na.omit(p_values)
+
+hist(
+  p_values,
+  breaks = 20,
+  main = "Histogram of p-values",
+  xlab = "p-value for livch",
+  ylab = "Frequency",
+  col = "lightblue"
+)
+
+
+chisq_tests_urban = lapply(split_data, function(group) {
+  if (length(unique(group$use)) > 1 &&
+      length(unique(group$urban)) > 1) {
+    chisq.test(table(group$use, group$urban))
+  } else {
+    NULL
+  }
+})
+chisq_tests_urban
+
+p_values = sapply(chisq_tests_urban, function(test) {
+  if (!is.null(test)) {
+    test$p.value
+  } else {
+    NA
+  }
+})
+
+p_values = na.omit(p_values)
+
+hist(
+  p_values,
+  breaks = 20,
+  main = "Histogram of p-values",
+  xlab = "p-value for urban",
+  ylab = "Frequency",
+  col = "lightblue"
+)
+
+chisq.test(table(trainData$use, trainData$livch))
+chisq.test(table(trainData$use, trainData$urban))
+```
+
+```{r}
+set.seed(24)  
+selected_districts = sample(unique(trainData$district), 10)
+
+subset_data = trainData[trainData$district %in% selected_districts, ]
+
+sub_data =
+  subset_data |>
+  mutate(rownum = as.numeric(factor(district, levels = unique(district))))
+
+plot(sub_data$age, sub_data$rownum,  
+     xlab = "Age, months", 
+     ylab = "number of district", 
+     pch = 1, col = "black", 
+     xlim = c(min(sub_data$age), max(sub_data$age)), 
+     ylim = c(1, 10), 
+     axes = FALSE)      
+
+
+axis(1)
+
+points(sub_data$age[sub_data$use == 1], 
+       sub_data$rownum[sub_data$use == 1], 
+       pch = 16, col = "red")
+```
+
+
+# model
+
+
+## GEE 1.0
+
+```{r}
+fit0.gee = gee(
+  use ~ age + urban + livch,
+  id = district,
+  data = trainData,
+  family = binomial,
+  scale.fix = TRUE,
+  corstr = "independence"
+)
+
+summary(fit0.gee)
+
+fit1.gee = gee(
+  use ~ age + urban + livch,
+  id = district,
+  data = trainData,
+  family = binomial,
+  scale.fix = TRUE,
+  corstr = "exchangeable"
+)
+
+summary(fit1.gee)
+
+# fit2.gee = gee(
+#   use ~ age + urban + livch,
+#   id = district,
+#   data = trainData,
+#   family = binomial,
+#   scale.fix = TRUE,
+#   corstr = "AR-M"
+# )
+# 
+# summary(fit2.gee)
+```
+
+```{r}
+fit0.pack = geeglm(
+  use ~ age + urban + livch,
+  id = district,
+  data = trainData,
+  family = binomial,
+  scale.fix = TRUE,
+  corstr = "independence"
+)
+
+summary(fit0.pack)
+
+
+
+fit1.pack = geeglm(
+  use ~ age + urban + livch,
+  id = district,
+  data = trainData,
+  family = binomial,
+  scale.fix = TRUE,
+  corstr = "exchangeable"
+)
+
+summary(fit1.pack)
+
+fit2.pack = geeglm(
+  use ~ age + urban + livch,
+  id = district,
+  data = trainData,
+  family = binomial,
+  scale.fix = TRUE,
+  corstr = "ar1"
+)
+
+summary(fit2.pack)
+```
+
+```{r}
+coefficients = cbind(summary(fit0.gee)$coefficients,summary(fit0.pack)$coefficients)
+results = data.frame(
+  Variable = rownames(coefficients),
+  Estimate = coefficients[, "Estimate"],
+  model_SE = coefficients[, "Naive S.E."],
+  robust_SE = coefficients[, "Robust S.E."],
+  Estimate_glm = coefficients[, 6],
+  robust_SE_glm = coefficients[, "Std.err"]
+)
+
+# Add row labels
+results$Variable = c(
+  "Intercept",
+  "Age",
+  "livch1",
+  "livch2",
+  "livch3+",
+  "Urban"
+)
+```
+
+```{r}
+# Format the table using gt
+table = gt(data = results) |> 
+  tab_header(
+    title = "working independence Model Results"
+  ) |> 
+  cols_label(
+    Variable = "independent",
+    Estimate = "Estimate",
+    model_SE = "Model Error",
+    robust_SE = "Robust Error"
+  ) |> 
+  fmt_number(
+    columns = c("Estimate", "model_SE","robust_SE"),
+    decimals = 3
+  )
+
+# Print the table
+table
+```
+
+```{r}
+coefficients = cbind(summary(fit1.gee)$coefficients,summary(fit1.pack)$coefficients)
+results = data.frame(
+  Variable = rownames(coefficients),
+  Estimate = coefficients[, "Estimate"],
+  model_SE = coefficients[, "Naive S.E."],
+  robust_SE = coefficients[, "Robust S.E."],
+  Estimate_glm = coefficients[, 6],
+  robust_SE_glm = coefficients[, "Std.err"]
+)
+
+# Add row labels
+results$Variable = c(
+  "Intercept",
+  "Age",
+  "livch1",
+  "livch2",
+  "livch3+",
+  "Urban"
+)
+```
+
+```{r}
+# Format the table using gt
+table = gt(data = results) |> 
+  tab_header(
+    title = "working exchangeable Model Results"
+  ) |> 
+  cols_label(
+    Variable = "exchangeable",
+    Estimate = "Estimate",
+    model_SE = "Model Error",
+    robust_SE = "Robust Error"
+  ) |> 
+  fmt_number(
+    columns = c("Estimate", "model_SE","robust_SE"),
+    decimals = 3
+  )
+
+# Print the table
+table
+```
+
+```{r}
+coefficients = summary(fit2.pack)$coefficients
+coefficients |> 
+  knitr::kable()
+```
+
+
+## GEE 1.5
+
+```{r}
+set.seed(24)
+trainData_density = trainData |> 
+  group_by(district) |> 
+  mutate(density = sample(c(0,1), 1)) |> 
+  mutate(time = row_number(age)) |> 
+  ungroup()
+
+fit3.pack = geeglm(
+  use ~ age + urban + livch + density,
+  id = district,
+  data = trainData_density,
+  family = binomial,
+  scale.fix = TRUE,
+  corstr = "exchangeable"
+)
+summary(fit3.pack)
+
+fit3_summary = tidy(fit3.pack, conf.int = TRUE)
+
+# Create a well-formatted table using gt
+fit3_table = gt(fit3_summary) |> 
+  tab_header(
+    title = "GEE Model Results for Contraception Use"
+  ) |> 
+  cols_label(
+    term = "Variable",
+    estimate = "Estimate",
+    std.error = "Standard Error",
+    statistic = "Wald Statistic",
+    p.value = "P-value",
+    conf.low = "Confidence Interval (Lower)",
+    conf.high = "Confidence Interval (Upper)"
+  ) |> 
+  fmt_number(
+    columns = c(estimate, std.error, statistic, p.value, conf.low, conf.high),
+    decimals = 3
+  ) |> 
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+# Display the table
+fit3_table
+
+zcor = genZcor(
+  clusz = table(trainData_density$district),
+  waves = trainData_density$time,
+  corstrv = 4
+)
+
+temp = table(trainData_density$district, trainData_density$density)
+temp = cbind(temp, as.numeric(temp[,2]>0))
+nkStar0 = temp[, 1] * (temp[, 1] - 1) / 2
+nkStar1 = temp[, 2] * (temp[, 2] - 1) / 2
+nkStar = pmax(nkStar0, nkStar1)
+crowd.expend = rep(temp[,3], nkStar)
+
+rows.C = c(1:sum(nkStar))[crowd.expend == 1]
+
+zcor.CUNC = matrix(0, nrow(zcor), 2)
+zcor.CUNC[,1] = 1
+zcor.CUNC[rows.C,2] = 1
+```
+
+```{r}
+fit4.pack = geese(
+  use ~ age + urban + livch + density,
+  id = district,
+  data = trainData_density,
+  family = binomial,
+  scale.fix = TRUE,
+  corstr = "userdefined",
+  zcor = zcor.CUNC
+)
+summary(fit4.pack)
+```
+
+
+
+
+## glmm intercept
+
+```{r}
+fit.rl.01 = glmer(use ~ age + urban + livch + (1 | district),
+                   data = trainData,
+                   family = binomial,
+                  nAGQ = 01)
+summary(fit.rl.01)
+
+fit.rl.05 = glmer(use ~ age + urban + livch + (1 | district),
+                   data = trainData,
+                   family = binomial,
+                  nAGQ = 05)
+summary(fit.rl.05)
+
+fit.rl.10 = glmer(use ~ age + urban + livch + (1 | district),
+                   data = trainData,
+                   family = binomial,
+                  nAGQ = 10)
+summary(fit.rl.10)
+
+fit.rl.15 = glmer(use ~ age + urban + livch + (1 | district),
+                   data = trainData,
+                   family = binomial,
+                  nAGQ = 15)
+summary(fit.rl.15)
+```
+
+```{r}
+# Function to extract coefficients and random effect variance
+extract_results <- function(model) {
+  fixed <- fixef(model)  # Fixed effects
+  random <- as.numeric(VarCorr(model)$district)  # Random effect variance
+  c(fixed, sigma_gamma = sqrt(random))
+}
+
+# Combine results into a data frame
+results <- data.frame(
+  Parameter = c("β*_0", "β*_1", "β*_2","β*_3","β*_4","β*_5","alpha"),
+  nAGQ_1 = extract_results(fit.rl.01),
+  nAGQ_5 = extract_results(fit.rl.05),
+  nAGQ_10 = extract_results(fit.rl.10),
+  nAGQ_25 = extract_results(fit.rl.15)
+)
+```
+
+```{r}
+results_table <- gt(results) %>%
+  tab_header(
+    title = "Comparison of Estimates Across nAGQ Values"
+  ) %>%
+  cols_label(
+    Parameter = "Parameter",
+    nAGQ_1 = "nAGQ=1",
+    nAGQ_5 = "nAGQ=5",
+    nAGQ_10 = "nAGQ=10",
+    nAGQ_25 = "nAGQ=25"
+  ) %>%
+  fmt_number(
+    columns = c(nAGQ_1, nAGQ_5, nAGQ_10, nAGQ_25),
+    decimals = 4
+  ) %>%
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+```
+
+
+## glmm intercept/slope
+
+```{r}
+fit.ris.01 = glmer(use ~ age + urban + livch + (age | district),
+                   data = trainData,
+                   family = binomial)
+
+summary(fit.ris.01)
+```
+
+```{r}
+lrt = abs(as.numeric(2* (logLik(fit.ris.01)-logLik(fit.rl.01))))
+mix.chiSq = c(rchisq(5e5, df=1), rchisq(5e5, df=2))
+round(c(lrt, mean(mix.chiSq>lrt)),3)
+```
+
+# validation
+
+```{r}
+plot(fit1.pack$residuals)
+plot(residuals(fit.rl.05, type = "pearson"))
+```
+
+```{r}
+library(pROC)
+# Example: AUC for a binary outcome
+pred_glmm = predict(fit.rl.05,newdata = testData, type = "response")
+roc_curve_1 = roc(testData$use, pred_glmm)
+plot(roc_curve_1, main = "ROC Curve for Test Data in GLMM")
+auc_value_1 = auc(roc_curve_1)
+print(paste("AUC:", auc_value_1))
+
+pred_mm = predict(fit1.pack,newdata = testData, type = "response")
+roc_curve_2 = roc(testData$use, pred_mm)
+plot(roc_curve_2, main = "ROC Curve for Test Data in MM")
+auc_value_2 = auc(roc_curve_2)
+print(paste("AUC:", auc_value_2))
+```
+
+# result
+
+```{r}
+round(cbind(summary(fit1.pack)$coef[,c(1,2,4)], summary(fit.rl.05)$coef[,c(1,2,4)]),3) |> 
+  knitr::kable()
+```
+
